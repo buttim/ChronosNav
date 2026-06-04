@@ -6,34 +6,24 @@
 #include "NotoSansMonoSCB20.h"
 #include "NotoSansBold36.h"
 
-#define HEIGHT 135
-#define WIDTH 240
+const int HEIGHT = 135, WIDTH = 240,
+          LEDC_CHAN_A = 0, LEDC_CHAN_B = 1,
+          PWM_RES = 8, DUTY_ON = 128, DUTY_OFF = 0,
+          srcW = 48, srcH = 48, destW = 96, destH = 96;
 
-#define BUZZER_PIN_A GPIO_NUM_12
-#define BUZZER_PIN_B GPIO_NUM_13
-
-#define LEDC_CHAN_A 0
-#define LEDC_CHAN_B 1
-
-#define PWM_RES 8    // 8-bit resolution
-#define DUTY_ON 128  // 50% duty cycle for square wave
-#define DUTY_OFF 0   // 0% duty cycle (silence)
-
-const int srcW = 48, srcH = 48, destW = 96, destH = 96;
 const gpio_num_t TFT_BL_PIN = GPIO_NUM_4,
                  BAT_ADC_PIN = GPIO_NUM_34,
-                 BUTTON_TOP_PIN = GPIO_NUM_35,
-                 BUTTON_BTM_PIN = GPIO_NUM_0;
+                 BUTTON_TOP_PIN = GPIO_NUM_35, BUTTON_BTM_PIN = GPIO_NUM_0,
+                 BUZZER_PIN_A = GPIO_NUM_12, BUZZER_PIN_B = GPIO_NUM_13;
+
 ChronosESP32 watch("Chronos Nav", CS_135x240_114_RTF);
-MD_KeySwitch buttonTop(BUTTON_TOP_PIN, LOW),
-  buttonBtm(BUTTON_BTM_PIN, LOW);
+MD_KeySwitch buttonTop(BUTTON_TOP_PIN, LOW), buttonBtm(BUTTON_BTM_PIN, LOW);
 TFT_eSPI tft = TFT_eSPI(HEIGHT, WIDTH);
 TFT_eSprite img = TFT_eSprite(&tft);
-bool showETA = false, connected = false, navigation = false, lostConnection = false, find = false, notification = false;
-;
-String title, eta, duration, distance, directions("---"), notificationIconType, notificationTitle("NO MESSAGES"), notificationMessage;
-int battery = 0;
 Ticker tickBuzzOff;
+String title, eta, duration, distance, directions("---"), notificationIconType, notificationTitle("NO MESSAGES"), notificationMessage;
+bool showETA = false, connected = false, navigation = false, lostConnection = false, find = false, notification = false;
+int battery = 0;
 
 const char *notifTable[] = {
 	"TIME",
@@ -62,8 +52,55 @@ const char *notifTable[] = {
 	"SYNCED"
 };
 
+void drawBattery(int percent) {
+	if (percent > 100) percent = 100;
+	if (percent < 0) percent = 0;
 
-void redraw();
+	const int batW = 35, batH = 18, nipW = 3,
+	          canvasW = batW + nipW, canvasH = batH + 4,
+	          xStart = 6, yStart = tft.height() - canvasH - 4;
+
+	uint16_t barColor = TFT_GREEN;
+	if (percent <= 20) barColor = TFT_RED;
+	else if (percent <= 50) barColor = TFT_YELLOW;
+
+	TFT_eSprite img = TFT_eSprite(&tft);
+	if (img.createSprite(canvasW, canvasH, 8) == nullptr) return;
+
+	img.fillSprite(TFT_NAVY);
+	img.drawRect(0, 2, batW, batH, TFT_WHITE);
+	img.fillRect(batW, 2 + (batH / 4), nipW, batH / 2, TFT_WHITE);
+
+	const int maxInnerW = batW - 4;
+	const int filledW = (maxInnerW * percent) / 100;
+	if (filledW > 0) img.fillRect(2, 4, filledW, batH - 4, barColor);
+
+	img.pushSprite(xStart, yStart);
+	img.deleteSprite();
+}
+
+void redraw() {
+	tft.fillScreen(TFT_NAVY);
+	if (connected) {
+		if (navigation) {
+			img.pushSprite(0, 0);  //??
+			tft.drawRightString(title, tft.width() - 2, 5, 0);
+			tft.drawRightString(distance, tft.width() - 2, 60, 0);
+			tft.fillRect(50, 100, tft.width(), tft.height(), TFT_NAVY);
+			if (showETA) {
+				tft.unloadFont();
+				tft.drawRightString(eta, tft.width() - 2, 105, 4);
+				tft.loadFont(NotoSansBold36);
+			} else
+				tft.drawRightString(duration, tft.width() - 2, 100, 0);
+		} else
+			tft.drawCentreString("Connected", tft.width() / 2, 20, 0);
+	} else {
+		tft.drawString("CHRONOS", 20, 5);
+		tft.drawString("NAV", 20, 40);
+	}
+	drawBattery(battery);
+}
 
 void initBuzzer() {
 	ledcAttach(BUZZER_PIN_A, 2000, PWM_RES);
@@ -75,16 +112,16 @@ void initBuzzer() {
 }
 
 void playTone(uint32_t frequency, uint32_t duration_ms) {
-	// Update frequencies using the proper v3.x API function
 	ledcChangeFrequency(BUZZER_PIN_A, frequency, PWM_RES);
 	ledcChangeFrequency(BUZZER_PIN_B, frequency, PWM_RES);
 
 	// Start the differential push-pull wave by turning on the duty cycles
 	ledcWrite(BUZZER_PIN_A, DUTY_ON);
 	ledcWrite(BUZZER_PIN_B, DUTY_ON);
+	digitalWrite(TFT_BL_PIN, LOW);
 
 	tickBuzzOff.once_ms(duration_ms, []() {
-		// Stop the sound completely
+		digitalWrite(TFT_BL_PIN, HIGH);
 		ledcWrite(BUZZER_PIN_A, DUTY_OFF);
 		ledcWrite(BUZZER_PIN_B, DUTY_OFF);
 	});
@@ -96,15 +133,11 @@ void showNotificationPopup(const String &iconType, const String &title, const St
 
 	tft.fillScreen(TFT_BLACK);
 
-	// const uint16_t *chosenIcon = generic_icon;
-	// if (iconType.equalsIgnoreCase("whatsapp")) chosenIcon = whatsapp_icon;
-	// else if (iconType.equalsIgnoreCase("telegram")) chosenIcon = telegram_icon;
 	int color = TFT_WHITE;
 	if (iconType.equalsIgnoreCase("whatsapp")) color = TFT_GREEN;
 	else if (iconType.equalsIgnoreCase("telegram")) color = TFT_CYAN;
 
-	//tft.pushImage(iconX, iconY, iconDim, iconDim, chosenIcon);
-	tft.fillCircle(iconX + iconDim/2, iconY + iconDim/2, iconDim/2, color);
+	tft.fillCircle(iconX + iconDim / 2, iconY + iconDim / 2, iconDim / 2, color);
 
 	tft.loadFont(NotoSansMonoSCB20);
 	tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -146,16 +179,6 @@ void drawNavIcon(int xStart, int yStart, uint8_t *bitmapData, uint16_t fgColor, 
 	img.pushSprite(xStart, yStart);
 }
 
-void connectionCallback(bool state) {
-	Serial.println(state ? "Connected" : "Disconnected");
-	tft.fillRect(0, 0, tft.width(), tft.height(), TFT_NAVY);
-	connected = state;
-	redraw();
-	if (!connected) {
-		lostConnection = true;
-	}
-}
-
 float getBatteryVoltage() {
 	uint32_t rawSum = 0;
 	for (int i = 0; i < 20; i++) {
@@ -171,34 +194,20 @@ float getBatteryVoltage() {
 }
 
 int getBatteryPercentage(float voltage) {
-	return constrain(map(voltage, 3.3, 4.2, 0, 100) * 100, 0, 100);
+	int percentage = (int)((voltage - 3.3) / (4.2 - 3.3) * 100);
+
+	if (percentage > 100) percentage = 100;
+	if (percentage < 0) percentage = 0;
+
+	return percentage;
 }
 
-void drawBattery(int percent) {
-	if (percent > 100) percent = 100;
-	if (percent < 0) percent = 0;
-
-	const int batW = 35, batH = 18, nipW = 3,
-	          canvasW = batW + nipW, canvasH = batH + 4,
-	          xStart = 6, yStart = tft.height() - canvasH - 4;
-
-	uint16_t barColor = TFT_GREEN;
-	if (percent <= 20) barColor = TFT_RED;
-	else if (percent <= 50) barColor = TFT_YELLOW;
-
-	TFT_eSprite img = TFT_eSprite(&tft);
-	if (img.createSprite(canvasW, canvasH, 8) == nullptr) return;
-
-	img.fillSprite(TFT_NAVY);
-	img.drawRect(0, 2, batW, batH, TFT_WHITE);
-	img.fillRect(batW, 2 + (batH / 4), nipW, batH / 2, TFT_WHITE);
-
-	const int maxInnerW = batW - 4;
-	const int filledW = (maxInnerW * percent) / 100;
-	if (filledW > 0) img.fillRect(2, 4, filledW, batH - 4, barColor);
-
-	img.pushSprite(xStart, yStart);
-	img.deleteSprite();
+void connectionCallback(bool state) {
+	tft.fillRect(0, 0, tft.width(), tft.height(), TFT_NAVY);
+	connected = state;
+	redraw();
+	if (!connected)
+		lostConnection = true;
 }
 
 void notificationCallback(Notification n) {
@@ -209,16 +218,6 @@ void notificationCallback(Notification n) {
 	notificationTitle = n.title;
 	notificationMessage = n.message;
 	notification = true;
-}
-
-void showEtaOrDuration() {
-	tft.fillRect(50, 100, tft.width(), tft.height(), TFT_NAVY);
-	if (showETA) {
-		tft.unloadFont();
-		tft.drawRightString(eta, tft.width() - 2, 105, 4);
-		tft.loadFont(NotoSansBold36);
-	} else
-		tft.drawRightString(duration, tft.width() - 2, 100, 0);
 }
 
 void configCallback(Config config, uint32_t a, uint32_t b) {
@@ -237,8 +236,8 @@ void configCallback(Config config, uint32_t a, uint32_t b) {
 				directions = nav.directions;
 				//~ Serial.printf("directions: %s ETA: %s duration: %s\n", nav.directions.c_str(), nav.eta.c_str(), nav.duration.c_str());
 				//~ Serial.printf("distance: %s title: %s speed: %s\n", nav.distance.c_str(), nav.title.c_str(), nav.speed.c_str());
-				redraw();
 			}
+			redraw();
 			break;
 		case CF_NAV_ICON:
 			//~ Serial.print("Navigation Icon data, position: ");
@@ -258,57 +257,41 @@ void configCallback(Config config, uint32_t a, uint32_t b) {
 	}
 }
 
-void redraw() {
-	tft.fillScreen(TFT_NAVY);
-	if (connected) {
-		if (navigation) {
-			img.pushSprite(0, 0);  //??
-			//~ tft.fillRect(96, 0, tft.width(), tft.height(), TFT_NAVY);
-			//~ tft.fillRect(0, 96, tft.width(), tft.height()-96, TFT_NAVY);
-			tft.drawRightString(title, tft.width() - 2, 5, 0);
-			tft.drawRightString(distance, tft.width() - 2, 60, 0);
-			showEtaOrDuration();
-		} else
-			tft.drawString("Connected", 0, 5);
-	} else {
-		tft.drawString("CHRONOS", 20, 5);
-		tft.drawString("NAV", 20, 40);
-	}
-	drawBattery(battery);
-}
-
 void setup() {
 	Serial.begin(115200);
-	initBuzzer();
+
 	tft.init();
 	tft.setRotation(1);
 	tft.loadFont(NotoSansBold36);
 	tft.setTextColor(TFT_YELLOW, TFT_NAVY, true);
 	img.createSprite(destW, destH, 8);
+	redraw();
 
 	watch.setConnectionCallback(connectionCallback);
 	watch.setNotificationCallback(notificationCallback);
 	watch.setConfigurationCallback(configCallback);
-
 	watch.begin();
+
 	buttonTop.begin();
 	buttonTop.enableRepeat(false);
 	buttonTop.enableLongPress(true);
 	buttonBtm.begin();
 	buttonBtm.enableRepeat(false);
+	buttonBtm.setLongPressTime(1500);
 	buttonBtm.enableLongPress(true);
-	redraw();
 
+	initBuzzer();
 	playTone(1000, 200);
 }
 
 void loop() {
 	static uint64_t tLastBattRead = 0;
 
-	if (tLastBattRead == 0 || millis() - tLastBattRead > 5000) {
+	if (tLastBattRead == 0 || millis() - tLastBattRead > 2000) {
 		tLastBattRead = millis();
 		tft.setCursor(0, tft.height() - 16);
-		battery = getBatteryPercentage(getBatteryVoltage());
+		float v = getBatteryVoltage();
+		battery = getBatteryPercentage(v);
 		drawBattery(battery);
 		watch.setBattery(battery);
 	}
@@ -361,7 +344,6 @@ void loop() {
 			redraw();
 			break;
 		case MD_KeySwitch::KS_LONGPRESS:
-			Serial.println("button top long press");
 			showNotificationPopup("Navigation", "Navigation", directions);
 			delay(3000);
 			redraw();
@@ -374,7 +356,6 @@ void loop() {
 			redraw();
 			break;
 		case MD_KeySwitch::KS_LONGPRESS:
-			Serial.println("button bottom long press");
 			esp_sleep_enable_ext0_wakeup(BUTTON_BTM_PIN, 0);
 			tft.writecommand(0x10);  //OFF
 			pinMode(TFT_BL_PIN, OUTPUT);
